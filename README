@@ -1,0 +1,6 @@
+
+## usage
+
+```sh
+docker run --rm -it -u $(id -u ${USER}):$(id -g ${USER}) -v $(PATH_TO_FLOW):/OpenROAD-flow-scripts/flow ghcr.io/aur20/compile_openroad:latest
+```
