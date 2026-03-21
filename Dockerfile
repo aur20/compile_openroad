@@ -1,10 +1,10 @@
 # Compile OpenROAD and yosys
 FROM openroad/debian12-dev:latest AS build
+RUN apt update && apt install -y libtbb-dev capnproto libcapnp-dev
 WORKDIR /
 RUN git clone --recursive https://github.com/The-OpenROAD-Project/OpenROAD-flow-scripts
-RUN apt update && apt install -y libtbb-dev capnproto libcapnp-dev
 WORKDIR /OpenROAD-flow-scripts
-RUN ./build_openroad.sh
+RUN ./build_openroad.sh --local
 
 # Collect executables and klayout
 FROM openroad/debian12-dev:latest AS base
