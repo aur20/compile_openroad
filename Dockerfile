@@ -2,10 +2,11 @@
 FROM openroad/debian12-dev:latest AS build
 WORKDIR /
 RUN git clone --recursive https://github.com/The-OpenROAD-Project/OpenROAD-flow-scripts
+RUN apt update && apt install -y libtbb-dev capnproto libcapnp-dev
 WORKDIR /OpenROAD-flow-scripts
-RUN ./build_openroad.sh --local
+RUN ./build_openroad.sh
 
 # Collect executables and klayout
 FROM openroad/debian12-dev:latest AS base
 COPY --from=build /OpenROAD-flow-scripts/flow/tools/install /OpenROAD-flow-scripts/flow/tools/install
-RUN apt update && apt install klayout && apt clean
+RUN apt update && apt install -y libtbb capnproto klayout && apt clean
