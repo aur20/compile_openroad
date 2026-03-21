@@ -2,5 +2,107 @@
 ## usage
 
 ```sh
-docker run --rm -it -u $(id -u ${USER}):$(id -g ${USER}) -v $(PATH_TO_FLOW):/OpenROAD-flow-scripts/flow ghcr.io/aur20/compile_openroad:latest
+docker run --rm -it -u $(id -u ${USER}):$(id -g ${USER}) -v ${PATH_TO_FLOW}:/OpenROAD-flow-scripts/flow ghcr.io/aur20/compile_openroad:latest
 ```
+
+## Obtain netlist from yosys
+```sh
+
+read_liberty -lib platforms/sky130hd/lib/*.lib
+read_verilog platforms/sky130hd/*.v
+read_verilog results/sky130hd/ibex/base/1_2_yosys.v
+hierarchy -check
+proc; opt; flatten
+write_json design.json
+```
+
+## gemini answers on report_wns
+
+1. Execution Flow
+   * Tcl Layer (Search.tcl): The report_wns proc is triggered. It identifies whether to report for -min (hold) or -max (setup) analysis and then calls the SWIG-bound command worst_slack_cmd.
+   * SWIG/C++ Binding (Search.i): worst_slack_cmd acts as a bridge, calling Sta::worstSlack on the singleton Sta instance.
+   * Core Logic (Sta.cc & Search.cc):
+       * Sta::worstSlack calls Search::worstSlack.
+       * Search::worstSlackPreamble is invoked to ensure timing is up-to-date. This triggers findAllArrivals() and findRequireds() if any changes (like netlist edits or new constraints) have invalidated the
+         previous results.
+       * Search::wnsSlacks iterates over all timing endpoints (e.g., flip-flop D pins, output ports).
+       * For each endpoint, the slack is calculated. For a setup check (-max), slack = required_time - arrival_time.
+       * The Search engine tracks the worst (minimum) slack across all endpoints.
+   * Result Formatting: Back in Search.tcl, if the worst slack is positive (meaning no violation), it is clamped to 0.0 for reporting as WNS (Worst Negative Slack). It then prints the value using report_line.
+
+  ---
+
+  2. Variables Consumed by STA
+  To calculate Slack, TNS (Total Negative Slack), and WNS (Worst Negative Slack), STA consumes variables from several levels of the design:
+
+  A. At the Slack Calculation Level (Endpoint)
+   * arrival_time (Data Arrival): Calculated as:
+      Launch Clock Edge Time + Launch Clock Network Delay + Data Path Delay (Gates + Wires).
+   * required_time (Data Required): Calculated as:
+      Target Clock Edge Time + Target Clock Network Delay + MCP Adjustment - Clock Uncertainty - Setup Margin + CRPR Adjustment.
+   * margin: The setup or hold requirement defined in the Liberty (.lib) file for the specific cell and transition.
+   * CRPR (Common Reconvergent Pessimism Removal): An adjustment added back to the required time to remove artificial pessimism caused by common paths in the clock tree.
+
+  B. At the Delay Calculation Level (Path)
+   * Liberty Variables (.lib):
+       * cell_delay: Looked up from 2D tables using Input Slew and Output Load.
+       * timing_check: Setup/hold constraints.
+   * Parasitic Variables (.spef / .def):
+       * net_delay: Extracted from wire resistance and capacitance (RC) values.
+       * load_capacitance: The sum of pin capacitances and wire capacitances on a net.
+   * Slew/Transition: Propagated through the graph, affecting the delay of downstream gates.
+
+  C. At the SDC / Constraint Level
+   * Clock Definitions: period, waveform (edges), and source_latency.
+   * Uncertainty/Jitter: set_clock_uncertainty values.
+   * Exceptions: set_multicycle_path (adjusts the capture edge), set_false_path (removes the endpoint from calculation), and set_min_delay / set_max_delay.
+   * Derating: set_timing_derate factors applied to cell or net delays to model process variation.
+
+  D. Aggregation (TNS / WNS)
+   * WNS: The minimum slack value among all endpoints (clamped to 0 if all are positive).
+   * TNS: The arithmetic sum of all negative slacks at all endpoints (ignoring positive slacks).
+
+## gemini answers on gpl and sta
+
+The Global Placement (gpl) module in OpenROAD uses timing information from STA (primarily through the rsz::Resizer and sta::dbSta interfaces) to perform timing-driven placement and multi-bit flip-flop (MBFF)
+  clustering.
+
+  The information consumed can be categorized as follows:
+
+  1. Slack Information (Net Weights)
+  The most direct impact on placement comes from Net Slacks.
+   * Source: src/gpl/src/timingBase.cpp calls rsz::Resizer::findResizeSlacks and rsz::Resizer::resizeNetSlack.
+   * Consumption: GPL retrieves the slack for each net. Nets with the worst (negative) slacks are assigned higher timing weights.
+   * Result: In the Nesterov placement loop (nesterovPlace.cpp), higher weights increase the "force" pulling the pins of critical nets together, reducing wirelength and delay for those specific paths.
+
+  2. Logic Functionality & Pin Roles (Liberty)
+  GPL queries STA's library database to understand the functional nature of the netlist.
+   * Source: src/gpl/src/mbff.cpp and src/gpl/src/placerBase.cpp.
+   * Consumption:
+       * Pin Identification: Uses sta::dbNetwork to identify which pins are Clock, Data (D), Output (Q), Scan-Enable, Reset, or Preset.
+       * Sequential Behavior: Uses sta::Sequential and sta::FuncExpr from Liberty to verify that flip-flops are functionally equivalent before clustering them into multi-bit cells.
+       * Clock Polarity: Checks if a clock is active-high or active-low using STA's function expression evaluator.
+
+  3. Timing Paths (FF-Pair Relationships)
+  For MBFF clustering, GPL looks at the "connections" defined by timing paths.
+   * Source: src/gpl/src/mbff.cpp.
+   * Consumption: It identifies launch-capture flip-flop pairs. The goal is to cluster FFs that share timing-critical paths to minimize the relative displacement between them, which helps preserve or improve
+     timing slack during the clustering process.
+   * Parameter: The num_paths variable in the cluster_flops command determines how many of these timing relationships are considered.
+
+  4. Power and Area Data
+  While primarily for optimization, this data is retrieved through STA bindings.
+   * Source: src/gpl/src/mbff.cpp.
+   * Consumption: Leakage Power and Cell Area from Liberty are used to calculate the cost-benefit ratio of replacing multiple single-bit flip-flops with a single multi-bit flip-flop.
+
+  Summary Table
+
+  ┌────────────────┬──────────────────┬─────────────────────────────────────────────────────┐
+  │ Information    │ Interface        │ GPL Usage                                           │
+  ├────────────────┼──────────────────┼─────────────────────────────────────────────────────┤
+  │ Net Slack      │ rsz::Resizer     │ Reweighting nets to pull critical pins closer.      │
+  │ Pin Types      │ sta::dbNetwork   │ Identifying Clocks, D-inputs, and Q-outputs.        │
+  │ Logic Func     │ sta::FuncExpr    │ Ensuring functional safety for MBFF clustering.     │
+  │ Critical Paths │ sta::Path        │ Minimizing displacement of launch-capture FF pairs. │
+  │ Leakage Power  │ sta::LibertyCell │ Estimating power savings for MBFF.                  │
+  └────────────────┴──────────────────┴─────────────────────────────────────────────────────┘

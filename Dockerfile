@@ -1,9 +1,11 @@
-# Image includes Yosys and KLayout
-FROM openroad/flow-ubuntu22.04-dev:50ff2b
+# Compile OpenROAD and yosys
+FROM openroad/debian12-dev:latest AS build
+WORKDIR /
+RUN git clone --recursive https://github.com/The-OpenROAD-Project/OpenROAD-flow-scripts
+WORKDIR /OpenROAD-flow-scripts
+RUN ./build_openroad.sh --local
 
-WORKDIR /opt
-RUN git clone --recursive --depth 1 https://github.com/The-OpenROAD-Project/OpenROAD.git \
- && cd OpenROAD \
- && ./etc/Build.sh \
- && cd build && make install \
- && rm -rf /opt/OpenROAD
+# Collect executables and klayout
+FROM openroad/debian12-dev:latest AS base
+COPY --from=build /OpenROAD-flow-scripts/flow/tools/install /OpenROAD-flow-scripts/flow/tools/install
+RUN apt update && apt install klayout && apt clean
