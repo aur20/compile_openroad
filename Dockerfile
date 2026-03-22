@@ -8,5 +8,5 @@ RUN ./build_openroad.sh --local
 
 # Collect executables and klayout
 FROM openroad/debian12-dev:latest AS base
-COPY --from=build /OpenROAD-flow-scripts/flow/tools/install /OpenROAD-flow-scripts/flow/tools/install
+COPY --from=build /OpenROAD-flow-scripts/tools/install /OpenROAD-flow-scripts/tools/install
 RUN apt update && apt install -y libtbb capnproto klayout && apt clean
